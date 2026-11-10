@@ -1,26 +1,28 @@
 # Chest Filters for RuneScape: Dragonwilds
 
 A UE4SS Lua mod for RuneScape: Dragonwilds. It lets you tell a chest which
-items it takes, so **Fill Stacks** sorts your bag into the right chests without
-a "seed" item in each one.
+items it takes, so the **Storage Ledger** and **Fill Stacks** sort your bag into
+the right chests without a "seed" item in each one.
 
-In the game, Fill Stacks only moves an item into a chest that already holds
-one. So every sorted chest needs one of each item left in it, and when crafting
-from linked storage uses that last one up, the chest forgets it.
+In the game, a Storage Ledger and Fill Stacks only move an item into a chest
+that already holds one. So every sorted chest needs one of each item left in
+it, and when crafting from linked storage uses that last one up, the chest
+forgets it.
 
 - An open chest gets a **Filters** panel on its right.
 - **Drag an item onto the panel**, from your bag or from the chest. The item
   stays where it was; the panel now shows its picture. That is a filter.
 - **Add all in chest** makes a filter for every kind of item the chest holds
   right now.
-- **Fill Stacks** then also moves every item of a filtered kind from your bag
-  into the chest, whether or not the chest holds one already.
+- A **Storage Ledger** then also sends every item of a filtered kind from your
+  bag to that chest, whether or not the chest holds one already. So does
+  **Fill Stacks** in the chest's own window.
 - A filter is a note, not an item. Nothing is taken from you to set one and
   nothing sits in the chest for it, so crafting from linked storage can't use
   it up, and nothing else that looks into chests sees it.
 - Each filter shows how many of that item the chest holds. With none, the
   picture is faint.
-- **Click a filter** to remove it.
+- **Click a filter** to remove it. **Clear** (click it twice) removes them all.
 - Filters are saved per chest and are still there after a restart.
 - Client-side only. Other players and servers don't need it.
 - Doesn't change any world settings, so achievements keep working.
@@ -69,26 +71,34 @@ The mod folder contains `enabled.txt`, so UE4SS loads it without any change to
    item from your bag, or from the chest, onto the panel and let go: over a
    slot to put the filter there, or anywhere else on the panel to use the first
    free slot.
-3. Press **Fill Stacks** (F unless you changed it). Everything in your bag that
-   matches a filter goes into the chest, along with what the game's own Fill
-   Stacks moves. The panel says how many items the filters moved.
+3. Use a **Storage Ledger** near your chests. Everything in your bag that
+   matches a filter goes to its chest, along with what the ledger moves by
+   itself. A ledger only reaches chests that are **Linked** and within its
+   range, the same as without the mod.
+4. Or open a chest and press **Fill Stacks** (F unless you changed it):
+   everything in your bag that matches that chest's filters goes in, and the
+   panel says how many items the filters moved.
 
 Good to know:
 
 - The panel has one filter slot for each slot of the chest, eight to a row:
   16 on a crate, 64 on an iron chest.
-- Fill Stacks leaves your **hotbar** alone, so the food and tools you carry
-  there stay with you. **Quest items** are never moved. Both can be changed in
-  the settings.
+- Filters leave your **hotbar** alone, so the food and tools you carry there
+  stay with you. **Quest items** are never moved. Both can be changed in the
+  settings.
+- If two chests have a filter for the same item, a ledger sends it to the first
+  of them it comes to.
 - If the chest is full, the items that don't fit stay in your bag.
 - Only chests and other storage you built get the panel. Loot chests don't.
 - A filter belongs to the chest. Take the chest down and build it again, and it
   is a new chest with no filters.
 - Filters are set with the mouse, and the mod notices Fill Stacks by its
-  keyboard key. On a controller the game's own Fill Stacks works as always, but
-  the filters aren't used.
-- In someone else's world your filters are yours alone: they are kept on your
-  PC, and other players don't see them.
+  keyboard key. On a controller the Storage Ledger uses the filters; Fill
+  Stacks in the chest window works as always but doesn't.
+- Your filters are kept on your PC, and other players don't see them. A Storage
+  Ledger does its work on the host's game, so in someone else's world it uses
+  the host's filters (if the host has the mod), not yours. Fill Stacks in the
+  chest window uses yours.
 
 ## Settings
 
@@ -120,10 +130,16 @@ writes that file; updates don't touch it.
   its slot.
 - Every building has an id that the game saves with the world (`SpudGuid`).
   That is the chest's name in `saved_chests.txt`.
-- The game runs its own Fill Stacks without anything a mod can listen to, so
-  the mod watches the key it is bound to (read from the game's key bindings)
-  while a chest is open. A moment after the key goes down it walks the bag and
-  moves each stack of a filtered kind with
+- A Storage Ledger (`BP_InventoryDropoffPoint`) goes through the linked chests
+  around it. For each one it asks the game whether Fill Stacks would move
+  anything (`InventoryComponent:CouldFillStacks`) and, if so, has the game do it
+  (`InventoryComponent:FillStacks`). The mod listens to both: a chest whose
+  filters match something in the bag answers yes, and when it is filled the
+  filtered items are moved first.
+- The chest window runs its own Fill Stacks without anything a mod can listen
+  to, so there the mod watches the key it is bound to (read from the game's key
+  bindings) while a chest is open.
+- Either way the items are moved with
   `InventoryController:MoveItemBetweenInventoriesAnySlot`, the call a quick
   transfer makes: into a stack with room, or else an empty slot.
 - A filter slot is clicked through an invisible check box. A click flips it,
@@ -147,9 +163,10 @@ every chest opened and what each Fill Stacks moved.
 
 - **No Filters panel**: check that UE4SS is installed and that the log has
   `[ChestFilters] Loaded`. The panel only shows on storage you built.
-- **Fill Stacks doesn't move a filtered item**: check it isn't on your hotbar,
-  and that the chest has room. If you changed the Fill Stacks key, reopen the
-  chest once so the mod reads the new key.
+- **A filtered item isn't moved**: check it isn't on your hotbar, and that the
+  chest has room. For a Storage Ledger the chest also has to be **Linked** and
+  in the ledger's range. If you changed the Fill Stacks key, reopen the chest
+  once so the mod reads the new key.
 
 ## Uninstall
 

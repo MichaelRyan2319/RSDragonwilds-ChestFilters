@@ -71,9 +71,11 @@ local PANEL_W = COLUMNS * CELL_W + PANEL_PAD.Left + PANEL_PAD.Right
 -- The gap between the chest window and this panel.
 local PANEL_GAP = 2
 
-local HINT_EMPTY = "Drag an item here. Fill Stacks will then also move that kind of item from your bag into this chest."
-local HINT_SET = "Fill Stacks also moves these from your bag into this chest. Drag an item here to add it; click one to remove it."
+local HINT_EMPTY = "Drag an item here. Fill Stacks and Storage Ledgers will then also move that kind of item from your bag into this chest."
+local HINT_SET = "Fill Stacks and Storage Ledgers also move these from your bag into this chest. Drag an item here to add it; click one to remove it."
 local HINT_ADD_ALL = "Adds a filter for every kind of item that is in this chest now."
+local HINT_CLEAR = "Removes every filter from this chest."
+local HINT_CLEAR_SURE = "Click again to remove every filter from this chest."
 
 ------------------------------------------------------------------ small helpers
 
@@ -363,24 +365,28 @@ local function TypingName(main)
     return ok and typing == true
 end
 
--- Moves every item of a filtered kind from the bag into the chest. Returns what it was asked
--- to move, to be counted a moment later.
-local function Deposit(pc, inventory, key)
-    local list = Filters[key]
-    if not list then return nil end
-    local wanted = {}
-    for _, path in pairs(list) do wanted[path] = true end
-
-    local bag, controller = pc.InventoryComponent, pc.InventoryController
-    if not (Valid(bag) and Valid(controller)) then return nil end
-    local slots = bag.ItemSlots
-    -- The bag is one long row: the hotbar, then Items, Runes and Ammunition, then Quest Items.
+-- The slots of a bag that a filter may take from (1 is the first slot). The bag is one long
+-- row: the hotbar, then Items, Runes and Ammunition, then Quest Items.
+local function BagRange(bag)
     local hotbar = 8
     pcall(function() hotbar = bag.NumberOfQuickActionSlots end)
     local first = config.IncludeHotbar and 1 or hotbar + 1
-    local last = #slots
+    local last = #bag.ItemSlots
     if not config.IncludeQuestItems then last = math.min(last, hotbar + 96) end
+    return first, last
+end
 
+-- Moves every item of a filtered kind from a bag into the chest, through the bag owner's
+-- inventory controller. Returns what it was asked to move, to be counted afterwards.
+local function Deposit(bag, controller, inventory, key)
+    local list = Filters[key]
+    if not list then return nil end
+    if not (Valid(bag) and Valid(controller)) then return nil end
+    local wanted = {}
+    for _, path in pairs(list) do wanted[path] = true end
+
+    local slots = bag.ItemSlots
+    local first, last = BagRange(bag)
     local before = 0
     for i = first, last do
         local item = slots[i]
@@ -394,6 +400,77 @@ local function Deposit(pc, inventory, key)
         end
     end
     return { wanted = wanted, before = before, first = first, last = last }
+end
+
+-- How many of the items a deposit was asked to move are still in the bag.
+local function LeftInBag(bag, deposit)
+    local left = 0
+    for path, count in pairs(CountItems(bag, deposit.first, deposit.last)) do
+        if deposit.wanted[path] then left = left + count end
+    end
+    return left
+end
+
+------------------------------------------------------------------ the Storage Ledger
+
+-- A Storage Ledger sends what the player carries to the linked chests around it. For each
+-- chest it asks the game whether Fill Stacks would move anything (CouldFillStacks) and, if so,
+-- has the game do it (FillStacks). Both are called from the ledger's blueprint, so a mod can
+-- listen to them: a chest whose filters match something in the bag says yes, and gets those
+-- items when it is filled. (The chest window's own Fill Stacks never comes this way.)
+
+local playerControllerClass = nil
+local playerBags = {}       -- inventory address -> whether it is a player's bag
+local chestKeys = {}        -- inventory address -> { key = its chest's key or false, at = when read }
+local bagKinds = { address = nil, at = 0, kinds = {} }
+
+local function ForgetLedgerCaches()
+    playerBags, chestKeys = {}, {}
+    bagKinds = { address = nil, at = 0, kinds = {} }
+end
+
+local function IsPlayerBag(bag)
+    if bag == nil or not bag:IsValid() then return false end
+    local address = bag:GetAddress()
+    local known = playerBags[address]
+    if known ~= nil then return known end
+    if not Valid(playerControllerClass) then playerControllerClass = StaticFindObject("/Script/Engine.PlayerController") end
+    local owner = bag:GetOwner()
+    known = Valid(owner) and Valid(playerControllerClass) and owner:IsA(playerControllerClass) == true
+    playerBags[address] = known
+    return known
+end
+
+-- A ledger asks about every chest around it, again and again while the player looks at it, so
+-- what can be remembered is: which chest an inventory belongs to (for ten seconds), and what
+-- the bag holds (for a quarter of a second).
+local function KeyOfInventory(inventory, now)
+    local address = inventory:GetAddress()
+    local entry = chestKeys[address]
+    if entry and now - entry.at < 10 then return entry.key end
+    local key = ChestKey(inventory) or false
+    chestKeys[address] = { key = key, at = now }
+    return key
+end
+
+local function KindsInBag(bag, now)
+    local address = bag:GetAddress()
+    if bagKinds.address == address and now - bagKinds.at < 0.25 then return bagKinds.kinds end
+    local first, last = BagRange(bag)
+    bagKinds = { address = address, at = now, kinds = CountItems(bag, first, last) }
+    return bagKinds.kinds
+end
+
+-- The chest's key if its filters would take something from the bag.
+local function FiltersWant(bag, inventory, now)
+    local key = KeyOfInventory(inventory, now)
+    local list = key and Filters[key]
+    if not list then return nil end
+    local kinds = KindsInBag(bag, now)
+    for _, path in pairs(list) do
+        if kinds[path] then return key end
+    end
+    return nil
 end
 
 ------------------------------------------------------------------ building blocks for the panel
@@ -646,16 +723,20 @@ local function BuildUi(main)
     column:SetVisibility(SELF_HIT_TEST_INVISIBLE)
     Layer(overlay, column, PANEL_PAD)
 
-    -- The title, with the button on its right.
+    -- The title, with the buttons on its right.
     local header = New("/Script/UMG.HorizontalBox", tree, "Header")
     header:SetVisibility(SELF_HIT_TEST_INVISIBLE)
     local titles = New("/Script/UMG.VerticalBox", tree, "Titles")
     titles:SetVisibility(HIT_TEST_INVISIBLE)
     titles:AddChildToVerticalBox(Text(tree, "FILTERS", true, 13, WHITE))
-    titles:AddChildToVerticalBox(Text(tree, "Fill Stacks also takes:", false, 9, DIM))
+    titles:AddChildToVerticalBox(Text(tree, "This chest also takes:", false, 9, DIM))
     local titlesSlot = header:AddChildToHorizontalBox(titles)
     titlesSlot:SetSize({ Value = 1, SizeRule = SIZE_FILL })
     titlesSlot:SetPadding(Padding(3, 0, 0, 0))
+    built.clear = Button(tree, "Clear")
+    local clearSlot = header:AddChildToHorizontalBox(built.clear.root)
+    clearSlot:SetVerticalAlignment(CENTER)
+    clearSlot:SetPadding(Padding(0, 0, 6, 6))
     built.addAll = Button(tree, "Add all in chest")
     local buttonSlot = header:AddChildToHorizontalBox(built.addAll.root)
     buttonSlot:SetVerticalAlignment(CENTER)
@@ -762,28 +843,72 @@ local deposit = nil             -- what the last Fill Stacks was asked to move, 
 local message, messageUntil = nil, 0
 local ignoreClicksUntil = 0
 local nextCount = 0
+local clearSure = nil           -- the Clear button was clicked once: { key, till }
 
--- The game calls these itself in some builds; where it does, they are a second way to hear
--- about Fill Stacks (a controller's button, say).
-local FILL_HOOKS = {
-    "/Script/Dominion.WorldActorInventoryUIAPI:HandleFillStacksByPlayer",
-    "/Script/Dominion.InventoryUIAPI:HandleFillStacksInWorldInventory",
-    "/Script/Dominion.InventoryController:Server_FillStacksBetweenInventories",
+-- The chest window's Fill Stacks. The game calls these itself in some cases (a guest in someone
+-- else's world, say); where it does, they are a second way to hear about it.
+local function OnFillStacksAsked()
+    if not stopped then fillRequested = true end
+end
+
+-- A ledger asking whether Fill Stacks would move anything from a player's bag into a chest.
+-- Returning true makes that the game's answer; returning nothing leaves the game's own.
+local function OnCouldFillStacks(bagParam, inventoryParam)
+    if stopped then return end
+    local ok, want = pcall(function()
+        local bag, inventory = bagParam:get(), inventoryParam:get()
+        if not IsPlayerBag(bag) or inventory == nil or not inventory:IsValid() then return false end
+        return FiltersWant(bag, inventory, os.clock()) ~= nil
+    end)
+    if not ok then
+        Report(false, want)
+        return
+    end
+    if want then return true end
+end
+
+-- A ledger filling a chest from a player's bag. The filtered items go first; the game's own
+-- Fill Stacks follows. Returning true tells the ledger something was moved, so it shows its
+-- lights flying to the chest.
+local function OnFillStacks(bagParam, inventoryParam)
+    if stopped then return end
+    local ok, moved = pcall(function()
+        local bag, inventory = bagParam:get(), inventoryParam:get()
+        if not IsPlayerBag(bag) or inventory == nil or not inventory:IsValid() then return 0 end
+        local key = FiltersWant(bag, inventory, os.clock())
+        if not key then return 0 end
+        local done = Deposit(bag, bag:GetOwner().InventoryController, inventory, key)
+        if not done then return 0 end
+        bagKinds.at = 0     -- the bag has changed
+        local count = done.before - LeftInBag(bag, done)
+        Debug(string.format("Storage Ledger: %d of %d filtered items moved into chest %s", count, done.before, key))
+        return count
+    end)
+    if not ok then
+        Report(false, moved)
+        return
+    end
+    if moved > 0 then return true end
+end
+
+local HOOKS = {
+    { path = "/Script/Dominion.WorldActorInventoryUIAPI:HandleFillStacksByPlayer", call = OnFillStacksAsked },
+    { path = "/Script/Dominion.InventoryUIAPI:HandleFillStacksInWorldInventory", call = OnFillStacksAsked },
+    { path = "/Script/Dominion.InventoryController:Server_FillStacksBetweenInventories", call = OnFillStacksAsked },
+    { path = "/Script/Dominion.InventoryComponent:CouldFillStacks", call = OnCouldFillStacks },
+    { path = "/Script/Dominion.InventoryComponent:FillStacks", call = OnFillStacks },
 }
-local hooked, nextHookTry = {}, 0
+local nextHookTry = 0
 
 -- The game's functions aren't all there in the first seconds after it starts.
-local function HookFillStacks(now)
+local function HookGame(now)
     if now < nextHookTry then return end
     nextHookTry = now + 5
     local missing = false
-    for _, path in ipairs(FILL_HOOKS) do
-        if not hooked[path] then
-            local ok = pcall(RegisterHook, path, function()
-                if not stopped then fillRequested = true end
-            end)
-            hooked[path] = ok
-            if not ok then missing = true end
+    for _, hook in ipairs(HOOKS) do
+        if not hook.done then
+            hook.done = pcall(RegisterHook, hook.path, hook.call)
+            if hook.done then Debug("Listening to " .. hook.path) else missing = true end
         end
     end
     if not missing then nextHookTry = math.huge end
@@ -922,7 +1047,30 @@ local function UpdateUi(now, pc)
         any = true
     end
 
-    -- The button.
+    -- The Clear button: one click asks, a second within three seconds does it.
+    local clear = ui.clear
+    local sure = clearSure ~= nil and clearSure.key == chest.key and now < clearSure.till
+    if not sure then clearSure = nil end
+    local clearHovered = clear.click:IsHovered() == true and not dragging
+    ShowText(clear.text, sure and "Sure?" or "Clear")
+    PaintButton(clear, clearHovered or sure)
+    if Clicked(clear.click) and not dragging and now >= ignoreClicksUntil then
+        if sure then
+            Filters[chest.key] = nil
+            SaveFilters()
+            clearSure, any = nil, false
+            Say("All filters removed from this chest.", now)
+            Debug("Cleared chest " .. chest.key)
+        elseif any then
+            clearSure = { key = chest.key, till = now + 3 }
+        else
+            Say("This chest has no filters.", now)
+        end
+    elseif clearHovered then
+        hint = sure and HINT_CLEAR_SURE or HINT_CLEAR
+    end
+
+    -- The Add all button.
     local button = ui.addAll
     local buttonHovered = button.click:IsHovered() == true and not dragging
     PaintButton(button, buttonHovered)
@@ -964,7 +1112,7 @@ local function UpdateUi(now, pc)
     end
     if fillAt and now >= fillAt then
         fillAt = nil
-        deposit = Deposit(pc, inventory, chest.key)
+        deposit = Deposit(pc.InventoryComponent, pc.InventoryController, inventory, chest.key)
         if deposit then
             deposit.at = now + 0.4
             nextCount = 0
@@ -972,13 +1120,8 @@ local function UpdateUi(now, pc)
     end
     if deposit and now >= deposit.at then
         -- How much of it left the bag.
-        local left = 0
         local bag = pc.InventoryComponent
-        if Valid(bag) then
-            for path, count in pairs(CountItems(bag, deposit.first, deposit.last)) do
-                if deposit.wanted[path] then left = left + count end
-            end
-        end
+        local left = Valid(bag) and LeftInBag(bag, deposit) or deposit.before
         local moved = deposit.before - left
         Debug(string.format("Fill Stacks: %d of %d filtered items moved", moved, deposit.before))
         if moved > 0 then
@@ -1006,6 +1149,8 @@ local function Controller(now)
     local ok, bag = pcall(function() return pc.InventoryComponent end)
     if not ok or not Valid(bag) then return nil end
     controller = pc
+    -- Another world: what was remembered about the last one's chests no longer holds.
+    ForgetLedgerCaches()
     return pc
 end
 
@@ -1029,7 +1174,7 @@ local function Tick()
 
     local pc = Controller(now)
     if not pc then return end
-    HookFillStacks(now)
+    HookGame(now)
     if not UiValid() then
         ui = nil
         CloseChest()
