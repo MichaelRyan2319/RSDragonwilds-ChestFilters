@@ -1,0 +1,6 @@
+dist/
+*.zip
+__pycache__/
+ChestFilters/saved_chests.txt
+ChestFilters/saved_chests.txt.tmp
+ChestFilters/stop.txt
