@@ -23,8 +23,12 @@ if ChestFiltersShutdown then pcall(ChestFiltersShutdown) end
 local VISIBLE, COLLAPSED, HIDDEN, HIT_TEST_INVISIBLE, SELF_HIT_TEST_INVISIBLE = 0, 1, 2, 3, 4
 -- EHorizontalAlignment / EVerticalAlignment (0 is Fill)
 local FILL, LEFT, CENTER, RIGHT, BOTTOM = 0, 1, 2, 3, 3
+-- ESlateSizeRule
+local SIZE_FILL = 1
 -- ESlateBrushDrawType
 local DRAW_NONE = 0
+-- EButtonClickMethod: a click is a press and a release on the same widget, or any release on it.
+local CLICK_DOWN_AND_UP, CLICK_MOUSE_UP = 0, 2
 
 -- The material the game draws its own inventory slots with: the background, the item's picture
 -- and the orange highlight are all parameters of it.
@@ -38,21 +42,38 @@ local WHITE = { R = 1, G = 1, B = 1, A = 1 }
 local CREAM = { R = 0.88, G = 0.84, B = 0.79, A = 1 }
 local DIM = { R = 0.60, G = 0.57, B = 0.53, A = 1 }
 
--- The game's inventory slots are 60 wide and 66 high, with these gaps around each.
-local SLOT_W, SLOT_H = 60, 66
-local SLOT_PAD = { Left = 2.5, Top = 2, Right = 2.5, Bottom = 1 }
-local CELL_W, CELL_H = SLOT_W + SLOT_PAD.Left + SLOT_PAD.Right, SLOT_H + SLOT_PAD.Top + SLOT_PAD.Bottom
--- Four filters to a row, and as many rows as the chest has (a chest's own rows are eight wide).
-local COLUMNS, MIN_ROWS, MAX_ROWS = 4, 2, 8
+-- A colour as it looks on screen (0-255); the game's widgets take linear colours.
+local function Screen(r, g, b)
+    local function linear(v)
+        v = v / 255
+        if v <= 0.04045 then return v / 12.92 end
+        return ((v + 0.055) / 1.055) ^ 2.4
+    end
+    return { R = linear(r), G = linear(g), B = linear(b), A = 1 }
+end
+
+-- The colours of the game's inventory tab buttons: a dark box with a thin edge, gold when lit.
+local BUTTON_LOOKS = {
+    normal = { fill = Screen(46, 44, 43), edge = Screen(62, 59, 52), text = CREAM },
+    hover = { fill = Screen(108, 87, 56), edge = Screen(168, 148, 90), text = WHITE },
+}
+
+-- The panel is a small copy of the chest's own grid: eight to a row, one filter for each slot
+-- of the chest. The game's slots are 60 x 66; these are four fifths of that.
+local SLOT_W, SLOT_H = 48, 53
+local SLOT_PAD = { Left = 2, Top = 1.5, Right = 2, Bottom = 1 }
+local CELL_W = SLOT_W + SLOT_PAD.Left + SLOT_PAD.Right
+local COLUMNS, MAX_ROWS = 8, 8
 -- The space the game leaves between a window's edge and what is in it.
 local PANEL_PAD = { Left = 20, Top = 27, Right = 20, Bottom = 34 }
-local HEADER_H, HINT_H = 44, 50
+local HEADER_H, HINT_H = 46, 32
 local PANEL_W = COLUMNS * CELL_W + PANEL_PAD.Left + PANEL_PAD.Right
 -- The gap between the chest window and this panel.
 local PANEL_GAP = 2
 
 local HINT_EMPTY = "Drag an item here. Fill Stacks will then also move that kind of item from your bag into this chest."
-local HINT_SET = "Fill Stacks also takes these from your bag. Drag an item here to add it; click one to remove it."
+local HINT_SET = "Fill Stacks also moves these from your bag into this chest. Drag an item here to add it; click one to remove it."
+local HINT_ADD_ALL = "Adds a filter for every kind of item that is in this chest now."
 
 ------------------------------------------------------------------ small helpers
 
@@ -145,10 +166,10 @@ local function IconOf(path)
     return texture
 end
 
--- How many of each kind of item an inventory holds, from slot `first` to slot `last` (1 is the
--- first slot): item path -> count.
+-- The kinds of item an inventory holds, from slot `first` to slot `last` (1 is the first slot):
+-- item path -> count, and the paths in the order they come.
 local function CountItems(inventory, first, last)
-    local counts = {}
+    local counts, order = {}, {}
     local slots = inventory.ItemSlots
     for i = first or 1, math.min(last or #slots, #slots) do
         local item = slots[i]
@@ -156,11 +177,12 @@ local function CountItems(inventory, first, last)
             local data = item.ItemData
             if data ~= nil and data:IsValid() then
                 local path = PathOf(data)
+                if not counts[path] then order[#order + 1] = path end
                 counts[path] = (counts[path] or 0) + item.Count
             end
         end
     end
-    return counts
+    return counts, order
 end
 
 ------------------------------------------------------------------ saved filters
@@ -216,10 +238,9 @@ local function LoadFilters()
     Debug("Loaded " .. count .. " filters")
 end
 
-local function FirstFreeSlot(key, slotCount)
-    local chest = Filters[key] or {}
+local function FirstFreeSlot(list, slotCount)
     for number = 1, slotCount do
-        if not chest[number] then return number end
+        if not list[number] then return number end
     end
     return nil
 end
@@ -227,21 +248,47 @@ end
 -- Puts a kind of item into a slot of a chest's panel. A chest lists each kind once, so if it
 -- is in another slot already it moves.
 local function SetFilter(key, number, path)
-    local chest = Filters[key] or {}
-    for other, existing in pairs(chest) do
-        if existing == path then chest[other] = nil end
+    local list = Filters[key] or {}
+    for other, existing in pairs(list) do
+        if existing == path then list[other] = nil end
     end
-    chest[number] = path
-    Filters[key] = chest
+    list[number] = path
+    Filters[key] = list
     SaveFilters()
 end
 
 local function RemoveFilter(key, number)
-    local chest = Filters[key]
-    if not (chest and chest[number]) then return end
-    chest[number] = nil
-    if next(chest) == nil then Filters[key] = nil end
+    local list = Filters[key]
+    if not (list and list[number]) then return end
+    list[number] = nil
+    if next(list) == nil then Filters[key] = nil end
     SaveFilters()
+end
+
+-- Adds a filter for every kind of item in the chest that has none yet. Returns how many were
+-- added and how many found no free slot.
+local function AddAllFilters(key, inventory, slotCount)
+    local list = Filters[key] or {}
+    local listed = {}
+    for _, path in pairs(list) do listed[path] = true end
+    local added, left = 0, 0
+    local _, order = CountItems(inventory)
+    for _, path in ipairs(order) do
+        if not listed[path] then
+            local number = FirstFreeSlot(list, slotCount)
+            if number then
+                list[number] = path
+                added = added + 1
+            else
+                left = left + 1
+            end
+        end
+    end
+    if added > 0 then
+        Filters[key] = list
+        SaveFilters()
+    end
+    return added, left
 end
 
 ------------------------------------------------------------------ the open chest
@@ -271,13 +318,46 @@ local function ChestKey(inventory)
     return okPlace and place or nil
 end
 
--- Moves every item of a filtered kind from the bag into the chest. Returns how many items the
--- bag held of those kinds before, and the slot range that was looked at.
+-- The keyboard and mouse keys Fill Stacks is on. The game calls its own Fill Stacks without
+-- anything a mod could listen to, so the mod watches the key.
+local function FillStacksKeys(main)
+    local names, seen = {}, {}
+    local action = "IA_WorldInventory_FillStacks"
+    pcall(function() action = main.FillStacksInputAction:GetFName():ToString() end)
+    local function add(mappings)
+        for i = 1, #mappings do
+            local mapping = mappings[i]
+            local mapped = mapping.Action
+            if mapped ~= nil and mapped:IsValid() and mapped:GetFName():ToString() == action then
+                local key = mapping.Key.KeyName:ToString()
+                -- On a controller Fill Stacks shares its button with Take All.
+                if key ~= "None" and key:sub(1, 7) ~= "Gamepad" and not seen[key] then
+                    seen[key] = true
+                    names[#names + 1] = key
+                end
+            end
+        end
+    end
+    -- The keys in use now, with the player's own bindings...
+    pcall(function()
+        local input = FindFirstOf("EnhancedPlayerInput")
+        if Valid(input) then add(input.EnhancedActionMappings) end
+    end)
+    -- ...or else the game's defaults.
+    if #names == 0 then pcall(function() add(main.WorldInventoryMappingContext.Mappings) end) end
+    if #names == 0 then names[1] = "F" end
+    local keys = {}
+    for _, name in ipairs(names) do keys[#keys + 1] = { KeyName = FName(name) } end
+    return keys, table.concat(names, ", ")
+end
+
+-- Moves every item of a filtered kind from the bag into the chest. Returns what it was asked
+-- to move, to be counted a moment later.
 local function Deposit(pc, inventory, key)
-    local chest = Filters[key]
-    if not chest then return nil end
+    local list = Filters[key]
+    if not list then return nil end
     local wanted = {}
-    for _, path in pairs(chest) do wanted[path] = true end
+    for _, path in pairs(list) do wanted[path] = true end
 
     local bag, controller = pc.InventoryComponent, pc.InventoryController
     if not (Valid(bag) and Valid(controller)) then return nil end
@@ -349,6 +429,14 @@ local function ShowText(text, value, color)
     if color then SetColor(text, color) end
 end
 
+-- A plain box in one colour.
+local function Box(tree, color)
+    local image = New("/Script/UMG.Image", tree, "Image")
+    image:SetColorAndOpacity(color)
+    image:SetVisibility(HIT_TEST_INVISIBLE)
+    return image
+end
+
 local function Show(widget, visible, shown)
     local want = visible and (shown or HIT_TEST_INVISIBLE) or COLLAPSED
     if widget:GetVisibility() ~= want then widget:SetVisibility(want) end
@@ -383,9 +471,10 @@ local STYLE_IMAGES = {
     "BackgroundImage", "BackgroundHoveredImage", "BackgroundPressedImage",
 }
 
--- A slot is clicked through a check box: a click flips it, and it stays flipped until this mod
--- looks, so no click is missed between two looks. The box itself draws nothing.
-local function ClickBox(tree)
+-- Everything on the panel that takes the mouse is a check box: a click flips it, and it stays
+-- flipped until this mod looks, so no click is missed between two looks. The box itself draws
+-- nothing; what is seen is drawn by the widgets around it.
+local function ClickBox(tree, method)
     local box = New("/Script/UMG.CheckBox", tree, "Click")
     box.IsFocusable = false
     local style = box.WidgetStyle
@@ -401,6 +490,7 @@ local function ClickBox(tree)
         local padding = style.Padding
         padding.Left, padding.Top, padding.Right, padding.Bottom = 0, 0, 0, 0
     end)
+    if method then box:SetClickMethod(method) end
     return box
 end
 
@@ -422,11 +512,11 @@ local function ItemSlot(tree)
     picture:SetVisibility(HIT_TEST_INVISIBLE)
     Layer(overlay, picture)
 
-    local count = Text(tree, "", true, 10, WHITE)
-    SetFont(count, FONT_HEADER, 10, 0)
-    Layer(overlay, count, Padding(0, 0, 5, 0.5), RIGHT, BOTTOM)
+    local count = Text(tree, "", true, 8, WHITE)
+    SetFont(count, FONT_HEADER, 8, 0)
+    Layer(overlay, count, Padding(0, 0, 4, 0), RIGHT, BOTTOM)
 
-    local click = ClickBox(tree)
+    local click = ClickBox(tree, CLICK_DOWN_AND_UP)
     Layer(overlay, click)
 
     return {
@@ -461,6 +551,31 @@ local function FillSlot(slot, path, count, lit)
     ShowText(slot.count, held and tostring(count) or "")
 end
 
+-- A button: a box with a thin edge and a label, lit while the mouse is on it.
+local function Button(tree, label)
+    local overlay = New("/Script/UMG.Overlay", tree, "Button")
+    overlay:SetVisibility(SELF_HIT_TEST_INVISIBLE)
+    local button = { root = overlay, looks = nil }
+    button.edge = Box(tree, BUTTON_LOOKS.normal.edge)
+    Layer(overlay, button.edge)
+    button.fill = Box(tree, BUTTON_LOOKS.normal.fill)
+    Layer(overlay, button.fill, Padding(1, 1, 1, 1))
+    button.text = Text(tree, label, false, 9, BUTTON_LOOKS.normal.text)
+    Layer(overlay, button.text, Padding(10, 3, 10, 2), CENTER, CENTER)
+    button.click = ClickBox(tree, CLICK_DOWN_AND_UP)
+    Layer(overlay, button.click)
+    return button
+end
+
+local function PaintButton(button, hovered)
+    local looks = hovered and BUTTON_LOOKS.hover or BUTTON_LOOKS.normal
+    if button.looks == looks then return end
+    button.looks = looks
+    button.edge:SetColorAndOpacity(looks.edge)
+    button.fill:SetColorAndOpacity(looks.fill)
+    SetColor(button.text, looks.text)
+end
+
 ------------------------------------------------------------------ the panel
 
 local ui = nil          -- everything this mod added to the chest window
@@ -488,7 +603,7 @@ local function BuildUi(main)
     RemoveLeftovers(canvas)
     shownText = {}   -- the old panel's texts are gone, and their addresses get used again
 
-    local built = { main = main, canvas = canvas, slots = {}, rows = {}, rowCount = MAX_ROWS }
+    local built = { main = main, canvas = canvas, slots = {}, rows = {}, dropMode = false }
 
     -- Where the game put the chest window, and how wide it is.
     local left, top, width = 700, 100, 670
@@ -498,28 +613,41 @@ local function BuildUi(main)
         local content = main.VerticalNavigation.WidgetTree.RootWidget
         left, top, width = offsets.Left, offsets.Top, content.WidthOverride + 40
     end)
-    built.x, built.y = left + width + PANEL_GAP, top
 
     local overlay = New("/Script/UMG.Overlay", tree, "Panel")
     overlay:SetVisibility(SELF_HIT_TEST_INVISIBLE)
     built.root = Sized(tree, overlay, PANEL_W, nil)
     built.root:SetVisibility(COLLAPSED)
 
-    -- The background takes the mouse, so an item let go of over this panel isn't let go of
-    -- over the ground behind it.
     local background = New("/Script/UMG.Image", tree, "Background")
     background:SetBrushFromMaterial(Asset(MAT_PANEL))
-    background:SetVisibility(VISIBLE)
+    background:SetVisibility(HIT_TEST_INVISIBLE)
     Layer(overlay, background)
+
+    -- The whole panel takes the mouse. The game ends a drag where the mouse button comes up:
+    -- on a slot, or on the ground behind the windows, which drops the item there. Over this
+    -- panel the button comes up on this box instead, and the mod ends the drag itself.
+    built.catch = ClickBox(tree, CLICK_MOUSE_UP)
+    Layer(overlay, built.catch)
 
     local column = New("/Script/UMG.VerticalBox", tree, "Column")
     column:SetVisibility(SELF_HIT_TEST_INVISIBLE)
     Layer(overlay, column, PANEL_PAD)
 
-    local header = New("/Script/UMG.VerticalBox", tree, "Header")
-    header:SetVisibility(HIT_TEST_INVISIBLE)
-    header:AddChildToVerticalBox(Text(tree, "FILTERS", true, 13, WHITE)):SetPadding(Padding(3, 0, 0, 0))
-    header:AddChildToVerticalBox(Text(tree, "Fill Stacks also takes:", false, 9, DIM)):SetPadding(Padding(3, 0, 0, 0))
+    -- The title, with the button on its right.
+    local header = New("/Script/UMG.HorizontalBox", tree, "Header")
+    header:SetVisibility(SELF_HIT_TEST_INVISIBLE)
+    local titles = New("/Script/UMG.VerticalBox", tree, "Titles")
+    titles:SetVisibility(HIT_TEST_INVISIBLE)
+    titles:AddChildToVerticalBox(Text(tree, "FILTERS", true, 13, WHITE))
+    titles:AddChildToVerticalBox(Text(tree, "Fill Stacks also takes:", false, 9, DIM))
+    local titlesSlot = header:AddChildToHorizontalBox(titles)
+    titlesSlot:SetSize({ Value = 1, SizeRule = SIZE_FILL })
+    titlesSlot:SetPadding(Padding(3, 0, 0, 0))
+    built.addAll = Button(tree, "Add all in chest")
+    local buttonSlot = header:AddChildToHorizontalBox(built.addAll.root)
+    buttonSlot:SetVerticalAlignment(CENTER)
+    buttonSlot:SetPadding(Padding(0, 0, 3, 6))
     column:AddChildToVerticalBox(Sized(tree, header, nil, HEADER_H))
 
     for _ = 1, MAX_ROWS do
@@ -540,17 +668,11 @@ local function BuildUi(main)
 
     local slot = canvas:AddChildToCanvas(built.root)
     slot:SetAutoSize(true)
-    slot:SetPosition({ X = built.x, Y = built.y })
+    slot:SetPosition({ X = left + width + PANEL_GAP, Y = top })
     -- Under the chest window, whose "Linked" and "Private" tips open to its right.
     slot:SetZOrder(-1)
 
-    -- The whole HUD sits in a box the game can scale (the interface size setting).
-    pcall(function()
-        local box = main:GetParent():GetParent():GetParent()
-        if ClassName(box) == "ScaleBox" then built.scaleBox = box end
-    end)
-
-    Debug(string.format("Added the Filters panel at %.0f, %.0f", built.x, built.y))
+    Debug(string.format("Added the Filters panel at %.0f, %.0f", left + width + PANEL_GAP, top))
     return built
 end
 
@@ -579,40 +701,21 @@ end
 
 -- Shows as many rows as the chest has.
 local function SetRows(count)
-    ui.rowCount = count
     for i, line in ipairs(ui.rows) do Show(line, i <= count, SELF_HIT_TEST_INVISIBLE) end
 end
 
-local layoutLibrary = nil
--- Where the mouse is, in the units the chest window is laid out in.
-local function Mouse(pc)
-    if not Valid(layoutLibrary) then layoutLibrary = Asset("/Script/UMG.Default__WidgetLayoutLibrary") end
-    local ok, x, y = pcall(function()
-        local at = layoutLibrary:GetMousePositionOnViewport(pc)
-        local x, y = at.X, at.Y
-        -- With the interface scaled, the HUD grows or shrinks around the middle of the screen.
-        local scale = Valid(ui.scaleBox) and ui.scaleBox.UserSpecifiedScale or 1
-        if scale and scale > 0 and math.abs(scale - 1) > 0.001 then
-            local size = layoutLibrary:GetViewportSize(pc)
-            local dpi = layoutLibrary:GetViewportScale(pc)
-            local midX, midY = size.X / dpi / 2, size.Y / dpi / 2
-            x, y = midX + (x - midX) / scale, midY + (y - midY) / scale
-        end
-        return x, y
-    end)
-    if ok then return x, y end
-    return nil, nil
-end
-
--- The slot at a place on the screen (1 is top left), and whether the place is on the panel.
-local function SlotAt(x, y)
-    if not x then return nil, false end
-    local height = PANEL_PAD.Top + HEADER_H + ui.rowCount * CELL_H + HINT_H + 5 + PANEL_PAD.Bottom
-    local onPanel = x >= ui.x and x < ui.x + PANEL_W and y >= ui.y and y < ui.y + height
-    local column = math.floor((x - ui.x - PANEL_PAD.Left) / CELL_W)
-    local row = math.floor((y - ui.y - PANEL_PAD.Top - HEADER_H) / CELL_H)
-    if column < 0 or column >= COLUMNS or row < 0 or row >= ui.rowCount then return nil, onPanel end
-    return row * COLUMNS + column + 1, onPanel
+-- While an item is being dragged, a slot counts the mouse button coming up on it as a click,
+-- wherever it went down. That is how an item is let go of on a slot. The rest of the time a
+-- click is a press and a release on the slot, so nothing is removed by accident.
+local function SetDropMode(on)
+    if ui.dropMode == on then return end
+    ui.dropMode = on
+    local method = on and CLICK_MOUSE_UP or CLICK_DOWN_AND_UP
+    for _, slot in ipairs(ui.slots) do
+        slot.click:SetClickMethod(method)
+        if slot.click:IsChecked() then slot.click:SetIsChecked(false) end
+    end
+    if ui.catch:IsChecked() then ui.catch:SetIsChecked(false) end
 end
 
 -- The kind of item being dragged, as its asset path.
@@ -636,15 +739,18 @@ end
 ------------------------------------------------------------------ the loop
 
 local stopped = false
-local chest = nil               -- the open chest: { address, inventory, key, slotCount }
-local drag = nil                -- the drag going on: { path, over, onPanel }
+local chest = nil               -- the open chest: { address, inventory, key, slotCount, keys }
+local drag = nil                -- the drag going on: { path }
 local fillRequested = false     -- the player asked the game for Fill Stacks
+local fillKeyDown = false
 local fillAt, lastFill = nil, 0
 local deposit = nil             -- what the last Fill Stacks was asked to move, until it is counted
 local message, messageUntil = nil, 0
 local ignoreClicksUntil = 0
 local nextCount = 0
 
+-- The game calls these itself in some builds; where it does, they are a second way to hear
+-- about Fill Stacks (a controller's button, say).
 local FILL_HOOKS = {
     "/Script/Dominion.WorldActorInventoryUIAPI:HandleFillStacksByPlayer",
     "/Script/Dominion.InventoryUIAPI:HandleFillStacksInWorldInventory",
@@ -663,7 +769,7 @@ local function HookFillStacks(now)
                 if not stopped then fillRequested = true end
             end)
             hooked[path] = ok
-            if ok then Debug("Hooked " .. path) else missing = true end
+            if not ok then missing = true end
         end
     end
     if not missing then nextHookTry = math.huge end
@@ -671,7 +777,12 @@ end
 
 local function CloseChest()
     chest, drag, fillAt, deposit = nil, nil, nil, nil
-    fillRequested = false
+    fillRequested, fillKeyDown = false, false
+    if ui and Valid(ui.root) then pcall(SetDropMode, false) end
+end
+
+local function Say(text, now, seconds)
+    message, messageUntil = text, now + (seconds or 3)
 end
 
 local function UpdateUi(now, pc)
@@ -693,12 +804,15 @@ local function UpdateUi(now, pc)
     if not chest or chest.address ~= address then
         CloseChest()
         local key = ChestKey(inventory)
-        local rows = math.ceil((inventory.MaxSlotCount or 32) / 8)
-        rows = math.max(MIN_ROWS, math.min(MAX_ROWS, rows))
+        local rows = math.ceil((inventory.MaxSlotCount or 32) / COLUMNS)
+        rows = math.max(1, math.min(MAX_ROWS, rows))
         chest = { address = address, inventory = inventory, key = key, slotCount = rows * COLUMNS }
-        SetRows(rows)
+        if key then
+            chest.keys, chest.keyNames = FillStacksKeys(main)
+            SetRows(rows)
+        end
         nextCount, message = 0, nil
-        Debug("Chest " .. tostring(key) .. " opened, " .. tostring(inventory.MaxSlotCount) .. " slots")
+        Debug(string.format("Chest %s opened, %s slots, Fill Stacks on %s", tostring(key), tostring(inventory.MaxSlotCount), tostring(chest.keyNames)))
     end
     if not chest.key then
         Show(ui.root, false)
@@ -716,36 +830,103 @@ local function UpdateUi(now, pc)
     end
     local counts = chest.counts or {}
 
-    -- An item being dragged, and let go of over the panel.
+    -- Is an item being dragged?
     local dragApi = main.DragAndDropAPI
     local dragging = Valid(dragApi) and dragApi:IsDragInProgress() == true
-    local over, onPanel = nil, false
-    if dragging or drag then over, onPanel = SlotAt(Mouse(pc)) end
-    if dragging then
-        if not drag then
-            drag = { path = DraggedPath(dragApi) }
-            Debug("Drag started: " .. tostring(drag.path))
-        end
-        drag.over, drag.onPanel = over, onPanel
-    elseif drag then
-        -- The mouse hardly moves between two looks; where it was last still counts.
-        if not onPanel then over, onPanel = drag.over, drag.onPanel end
-        Debug(string.format("Drag ended: %s, on panel %s, slot %s", tostring(drag.path), tostring(onPanel), tostring(over)))
-        if drag.path and onPanel then
-            local number = over or FirstFreeSlot(chest.key, chest.slotCount)
-            if number then
-                SetFilter(chest.key, number, drag.path)
-                filters = Filters[chest.key] or {}
-                message, messageUntil = NameOf(drag.path) .. " added.", now + 3
-            else
-                message, messageUntil = "No free filter slot. Click a filter to remove it.", now + 4
-            end
-        end
+    if dragging and not drag then
+        drag = { path = DraggedPath(dragApi) }
+        SetDropMode(true)
+        Debug("Drag started: " .. tostring(drag.path))
+    elseif drag and not dragging then
+        -- It ended somewhere else.
+        Debug("Drag ended away from the panel")
         drag = nil
+        SetDropMode(false)
         ignoreClicksUntil = now + 0.3
     end
 
-    -- Fill Stacks: the game has done its part; now the filters.
+    -- The slots.
+    local hint = nil
+    local any = false
+    local droppedOn = nil       -- the slot the dragged item was let go of on; 0 for the panel
+    local overPanel = ui.catch:IsHovered() == true
+    for number, slot in ipairs(ui.slots) do
+        if number <= chest.slotCount then
+            local path = filters[number]
+            if path then any = true end
+            local hovered = slot.click:IsHovered() == true
+            local clicked = Clicked(slot.click)
+            if dragging then
+                if hovered then overPanel = true end
+                if clicked then droppedOn = number end
+                FillSlot(slot, path, path and counts[path] or 0, hovered)
+            else
+                FillSlot(slot, path, path and counts[path] or 0, hovered and path ~= nil)
+                if clicked and path and now >= ignoreClicksUntil then
+                    RemoveFilter(chest.key, number)
+                    Say(NameOf(path) .. " removed.", now)
+                elseif hovered and path then
+                    hint = NameOf(path) .. ": click to remove."
+                end
+            end
+        end
+    end
+    if Clicked(ui.catch) and dragging and not droppedOn then droppedOn = 0 end
+
+    -- An item let go of on the panel.
+    if drag and droppedOn then
+        local list = Filters[chest.key] or {}
+        local number = droppedOn > 0 and droppedOn or FirstFreeSlot(list, chest.slotCount)
+        if not drag.path then
+            Say("That can't be a filter.", now)
+        elseif number then
+            SetFilter(chest.key, number, drag.path)
+            Say(NameOf(drag.path) .. " added.", now)
+        else
+            Say("No free filter slot. Click a filter to remove it.", now, 4)
+        end
+        Debug(string.format("Dropped %s on %s", tostring(drag.path), tostring(number)))
+        -- The item never left its slot; the game only has to stop showing it on the mouse.
+        pcall(function() dragApi:CallUserStopDrag() end)
+        drag, dragging = nil, false
+        SetDropMode(false)
+        ignoreClicksUntil = now + 0.3
+        any = true
+    end
+
+    -- The button.
+    local button = ui.addAll
+    local buttonHovered = button.click:IsHovered() == true and not dragging
+    PaintButton(button, buttonHovered)
+    if Clicked(button.click) and not dragging and now >= ignoreClicksUntil then
+        local added, left = AddAllFilters(chest.key, inventory, chest.slotCount)
+        if added > 0 and left > 0 then
+            Say(string.format("Added %d filter%s. No free slot for %d more.", added, added == 1 and "" or "s", left), now, 4)
+        elseif added > 0 then
+            Say(string.format("Added %d filter%s.", added, added == 1 and "" or "s"), now)
+        elseif left > 0 then
+            Say("No free filter slot. Click a filter to remove it.", now, 4)
+        elseif next(counts) == nil then
+            Say("The chest is empty.", now)
+        else
+            Say("Everything in the chest has a filter already.", now)
+        end
+        Debug(string.format("Add all: %d added, %d without a slot", added, left))
+        hint = message
+    elseif buttonHovered and not (message and now < messageUntil) then
+        hint = HINT_ADD_ALL
+    end
+
+    -- Fill Stacks: the key going down, then the game's own part, then the filters.
+    local down = false
+    for _, key in ipairs(chest.keys) do
+        if pc:IsInputKeyDown(key) then down = true end
+    end
+    if down and not fillKeyDown then
+        fillRequested = true
+        Debug("Fill Stacks key pressed")
+    end
+    fillKeyDown = down
     if fillRequested then
         fillRequested = false
         if now - lastFill > 0.4 then
@@ -773,34 +954,15 @@ local function UpdateUi(now, pc)
         local moved = deposit.before - left
         Debug(string.format("Fill Stacks: %d of %d filtered items moved", moved, deposit.before))
         if moved > 0 then
-            message, messageUntil = string.format("Filters moved %d item%s into the chest.", moved, moved == 1 and "" or "s"), now + 4
+            Say(string.format("Filters moved %d item%s into the chest.", moved, moved == 1 and "" or "s"), now, 4)
         elseif deposit.before > 0 then
-            message, messageUntil = "The chest has no room for the filtered items.", now + 4
+            Say("The chest has no room for the filtered items.", now, 4)
         end
         deposit = nil
         nextCount = 0
     end
 
-    -- The slots.
-    local hint = nil
-    local any = false
-    for number, slot in ipairs(ui.slots) do
-        if number <= chest.slotCount then
-            local path = filters[number]
-            if path then any = true end
-            local hovered = slot.click:IsHovered() == true
-            local lit
-            if dragging then lit = over == number else lit = hovered and path ~= nil end
-            FillSlot(slot, path, path and counts[path] or 0, lit)
-            if Clicked(slot.click) and path and not dragging and now >= ignoreClicksUntil then
-                RemoveFilter(chest.key, number)
-                message, messageUntil = NameOf(path) .. " removed.", now + 3
-            elseif hovered and path and not dragging then
-                hint = NameOf(path) .. ": click to remove."
-            end
-        end
-    end
-    if dragging and onPanel and drag.path then hint = "Let go to add " .. NameOf(drag.path) .. "." end
+    if dragging and overPanel and drag and drag.path then hint = "Let go to add " .. NameOf(drag.path) .. "." end
     if not hint and message and now < messageUntil then hint = message end
     ShowText(ui.hint, hint or (any and HINT_SET or HINT_EMPTY))
 end
