@@ -319,9 +319,11 @@ local function ChestKey(inventory)
 end
 
 -- The keyboard and mouse keys Fill Stacks is on. The game calls its own Fill Stacks without
--- anything a mod could listen to, so the mod watches the key.
+-- anything a mod could listen to, so the mod watches the key. Returns the keys, their names,
+-- and whether they are the keys in use now (the player's own bindings) or the game's defaults.
 local function FillStacksKeys(main)
     local names, seen = {}, {}
+    local live = true
     local action = "IA_WorldInventory_FillStacks"
     pcall(function() action = main.FillStacksInputAction:GetFName():ToString() end)
     local function add(mappings)
@@ -343,12 +345,22 @@ local function FillStacksKeys(main)
         local input = FindFirstOf("EnhancedPlayerInput")
         if Valid(input) then add(input.EnhancedActionMappings) end
     end)
-    -- ...or else the game's defaults.
-    if #names == 0 then pcall(function() add(main.WorldInventoryMappingContext.Mappings) end) end
+    -- ...or else the game's defaults. (The chest window's keys join the keys in use a moment
+    -- after it opens.)
+    if #names == 0 then
+        live = false
+        pcall(function() add(main.WorldInventoryMappingContext.Mappings) end)
+    end
     if #names == 0 then names[1] = "F" end
     local keys = {}
     for _, name in ipairs(names) do keys[#keys + 1] = { KeyName = FName(name) } end
-    return keys, table.concat(names, ", ")
+    return keys, table.concat(names, ", "), live
+end
+
+-- Typing a name for the chest isn't asking for Fill Stacks.
+local function TypingName(main)
+    local ok, typing = pcall(function() return main.VerticalNavigation.ChestNameText:HasKeyboardFocus() end)
+    return ok and typing == true
 end
 
 -- Moves every item of a filtered kind from the bag into the chest. Returns what it was asked
@@ -739,10 +751,12 @@ end
 ------------------------------------------------------------------ the loop
 
 local stopped = false
-local chest = nil               -- the open chest: { address, inventory, key, slotCount, keys }
+local chest = nil               -- the open chest: { address, inventory, key, slotCount }
 local drag = nil                -- the drag going on: { path }
 local fillRequested = false     -- the player asked the game for Fill Stacks
 local fillKeyDown = false
+-- The keys Fill Stacks is on, whether they were read from the keys in use, and when.
+local fillKeys, fillKeyNames, fillKeysLive, fillKeysAt = nil, nil, false, 0
 local fillAt, lastFill = nil, 0
 local deposit = nil             -- what the last Fill Stacks was asked to move, until it is counted
 local message, messageUntil = nil, 0
@@ -787,10 +801,14 @@ end
 
 local function UpdateUi(now, pc)
     local main = ui.main
+    -- The chest window is always there; closed, it is hidden.
     local visibility = main:GetVisibility()
-    local api = main.WorldInventoryManagerAPI
-    local inventory = Valid(api) and api.InventoryComponent or nil
-    if visibility == COLLAPSED or visibility == HIDDEN or not Valid(inventory) then
+    local inventory = nil
+    if visibility ~= COLLAPSED and visibility ~= HIDDEN then
+        local api = main.WorldInventoryManagerAPI
+        inventory = Valid(api) and api.InventoryComponent or nil
+    end
+    if not Valid(inventory) then
         if chest then
             CloseChest()
             Show(ui.root, false)
@@ -808,11 +826,12 @@ local function UpdateUi(now, pc)
         rows = math.max(1, math.min(MAX_ROWS, rows))
         chest = { address = address, inventory = inventory, key = key, slotCount = rows * COLUMNS }
         if key then
-            chest.keys, chest.keyNames = FillStacksKeys(main)
             SetRows(rows)
+            -- Read the Fill Stacks keys again now and then; the player can change them.
+            if not fillKeysLive or now - fillKeysAt > 60 then chest.readKeysAt = now + 0.3 end
         end
         nextCount, message = 0, nil
-        Debug(string.format("Chest %s opened, %s slots, Fill Stacks on %s", tostring(key), tostring(inventory.MaxSlotCount), tostring(chest.keyNames)))
+        Debug(string.format("Chest %s opened, %s slots", tostring(key), tostring(inventory.MaxSlotCount)))
     end
     if not chest.key then
         Show(ui.root, false)
@@ -820,6 +839,15 @@ local function UpdateUi(now, pc)
         return
     end
     Show(ui.root, true, SELF_HIT_TEST_INVISIBLE)
+
+    if not fillKeys or (chest.readKeysAt and now >= chest.readKeysAt) then
+        chest.readKeysAt = nil
+        local keys, names, live = FillStacksKeys(main)
+        if live or not fillKeysLive then
+            if names ~= fillKeyNames then Debug("Fill Stacks is on " .. names .. (live and "" or " (the game's default)")) end
+            fillKeys, fillKeyNames, fillKeysLive, fillKeysAt = keys, names, live, now
+        end
+    end
 
     local filters = Filters[chest.key] or {}
 
@@ -919,10 +947,10 @@ local function UpdateUi(now, pc)
 
     -- Fill Stacks: the key going down, then the game's own part, then the filters.
     local down = false
-    for _, key in ipairs(chest.keys) do
+    for _, key in ipairs(fillKeys) do
         if pc:IsInputKeyDown(key) then down = true end
     end
-    if down and not fillKeyDown then
+    if down and not fillKeyDown and not TypingName(main) then
         fillRequested = true
         Debug("Fill Stacks key pressed")
     end
@@ -938,7 +966,7 @@ local function UpdateUi(now, pc)
         fillAt = nil
         deposit = Deposit(pc, inventory, chest.key)
         if deposit then
-            deposit.at = now + 0.25
+            deposit.at = now + 0.4
             nextCount = 0
         end
     end

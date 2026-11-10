@@ -11,6 +11,8 @@ from linked storage uses that last one up, the chest forgets it.
 - An open chest gets a **Filters** panel on its right.
 - **Drag an item onto the panel**, from your bag or from the chest. The item
   stays where it was; the panel now shows its picture. That is a filter.
+- **Add all in chest** makes a filter for every kind of item the chest holds
+  right now.
 - **Fill Stacks** then also moves every item of a filtered kind from your bag
   into the chest, whether or not the chest holds one already.
 - A filter is a note, not an item. Nothing is taken from you to set one and
@@ -63,16 +65,18 @@ The mod folder contains `enabled.txt`, so UE4SS loads it without any change to
 
 1. Open a chest you built. The Filters panel is to the right of the chest
    window.
-2. Drag an item from your bag, or from the chest, onto the panel and let go.
-   Let go over a slot to put the filter there, or anywhere else on the panel to
-   use the first free slot.
-3. Press **Fill Stacks** (F by default). Everything in your bag that matches a
-   filter goes into the chest, along with what the game's own Fill Stacks moves.
+2. Click **Add all in chest** to make a filter for everything in it. Or drag an
+   item from your bag, or from the chest, onto the panel and let go: over a
+   slot to put the filter there, or anywhere else on the panel to use the first
+   free slot.
+3. Press **Fill Stacks** (F unless you changed it). Everything in your bag that
+   matches a filter goes into the chest, along with what the game's own Fill
+   Stacks moves. The panel says how many items the filters moved.
 
 Good to know:
 
-- The panel has four filters for each row of the chest: 16 on a 32-slot chest,
-  32 on a 64-slot chest.
+- The panel has one filter slot for each slot of the chest, eight to a row:
+  16 on a crate, 64 on an iron chest.
 - Fill Stacks leaves your **hotbar** alone, so the food and tools you carry
   there stay with you. **Quest items** are never moved. Both can be changed in
   the settings.
@@ -80,7 +84,9 @@ Good to know:
 - Only chests and other storage you built get the panel. Loot chests don't.
 - A filter belongs to the chest. Take the chest down and build it again, and it
   is a new chest with no filters.
-- Filters are set with the mouse. There is no controller way to set one yet.
+- Filters are set with the mouse, and the mod notices Fill Stacks by its
+  keyboard key. On a controller the game's own Fill Stacks works as always, but
+  the filters aren't used.
 - In someone else's world your filters are yours alone: they are kept on your
   PC, and other players don't see them.
 
@@ -93,7 +99,7 @@ restart the game.
 | --- | --- | --- |
 | `IncludeHotbar` | `false` | `true` lets filters take matching items from the hotbar too |
 | `IncludeQuestItems` | `false` | `true` lets filters move quest items |
-| `PollMs` | `33` | How often an open chest is checked, in milliseconds: for an item dropped on the panel and for clicks on it. Nothing is checked while no chest is open |
+| `PollMs` | `33` | How often an open chest is checked, in milliseconds: for an item dropped on the panel, for clicks on it and for the Fill Stacks key |
 | `DebugLogging` | `false` | Extra lines in `UE4SS.log` |
 
 The filters are in `Win64\ue4ss\Mods\ChestFilters\saved_chests.txt`. The mod
@@ -105,13 +111,19 @@ writes that file; updates don't touch it.
   fades with it. Its background and slots are drawn with the materials the game
   draws its chest window and inventory slots with.
 - The game says when an item is being dragged and which one
-  (`DragAndDropAPI`). When the drag ends with the mouse over the panel, the
-  mod saves the kind of item (its data asset's path) under the chest's id. The
-  drag itself ends as a drag onto nothing, so the item goes back to its slot.
+  (`DragAndDropAPI`). It ends a drag where the mouse button comes up: on one of
+  its slots, or on the ground behind the windows, which drops the item there.
+  The panel is neither, so it catches the button itself: while a drag is on,
+  its slots are check boxes that flip when the button comes up over them. The
+  mod then saves the kind of item (its data asset's path) under the chest's id
+  and tells the game the drag is over (`CallUserStopDrag`). The item never left
+  its slot.
 - Every building has an id that the game saves with the world (`SpudGuid`).
   That is the chest's name in `saved_chests.txt`.
-- The mod listens for the game's Fill Stacks. A moment later it walks the bag
-  and moves each stack of a filtered kind with
+- The game runs its own Fill Stacks without anything a mod can listen to, so
+  the mod watches the key it is bound to (read from the game's key bindings)
+  while a chest is open. A moment after the key goes down it walks the bag and
+  moves each stack of a filtered kind with
   `InventoryController:MoveItemBetweenInventoriesAnySlot`, the call a quick
   transfer makes: into a stack with room, or else an empty slot.
 - A filter slot is clicked through an invisible check box. A click flips it,
@@ -136,7 +148,8 @@ every chest opened and what each Fill Stacks moved.
 - **No Filters panel**: check that UE4SS is installed and that the log has
   `[ChestFilters] Loaded`. The panel only shows on storage you built.
 - **Fill Stacks doesn't move a filtered item**: check it isn't on your hotbar,
-  and that the chest has room.
+  and that the chest has room. If you changed the Fill Stacks key, reopen the
+  chest once so the mod reads the new key.
 
 ## Uninstall
 
